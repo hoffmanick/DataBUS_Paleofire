@@ -2,6 +2,7 @@ import datetime
 import glob
 import json
 import os
+import inspect
 
 import psycopg2
 from dotenv import load_dotenv
@@ -24,6 +25,8 @@ Run with uv
 Example usage:
     uv run databus_example.py --data data/ --template template.yml --logs data/logs/ --upload False
     uv run databus_example.py --data data/ --template template.yml --logs data/logs/ --upload True
+    uv run databus_example.py --data data_wide/ --template wide_template.yaml --logs data_wide/logs/ --upload True
+    uv run databus_example.py --data data/ --template fpd.yaml --logs data/logs/ 
 """
 
 args = nh.parse_arguments()
@@ -32,17 +35,17 @@ args = nh.parse_arguments()
 # This should be renamed to .env and updated with the appropriate database connection
 # information for your environment.
 load_dotenv()
-connection = json.loads(os.getenv("PGDB_TANK"))
+connection = json.loads(os.getenv("PGDB_LOCAL"))
 
-# Load YAML template and CSV/XLSX files
-filenames = glob.glob(args["data"] + "*.csv") + glob.glob(args["data"] + "*.xlsx")
+# Load YAML template and CSV files
+filenames = glob.glob(args["data"] + "*.csv")
 yml_dict = nh.template_to_dict(temp_file=args["template"])
 
 # Connect to the PostgreSQL database using psycopg2
 conn = psycopg2.connect(**connection, connect_timeout=5)
 cur = conn.cursor()
 
-start_time = datetime.now()
+start_time = datetime.datetime.now()
 print(f"Start uploading at {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
 
 for filename in tqdm(filenames, desc="Files", unit="file"):
@@ -50,15 +53,12 @@ for filename in tqdm(filenames, desc="Files", unit="file"):
     logfile = []
     databus = {}
 
-    if filename.endswith(".xlsx"):
-        csv_file = nh.read_xlsx(filename)
-    else:
-        csv_file = nh.read_csv(filename)
+    csv_file = nh.read_csv(filename)
     hashcheck = nh.hash_file(filename)
     filecheck = nh.check_file(filename, validation_files="data/")
 
     logfile = logfile + hashcheck["message"] + filecheck["message"]
-    logfile.append(f"\nNew Upload started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    logfile.append(f"\nNew Upload started at: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
     if hashcheck["pass"] is False and filecheck["pass"] is False:
         logfile.append("File must be properly validated before it can be uploaded.")
@@ -67,7 +67,7 @@ for filename in tqdm(filenames, desc="Files", unit="file"):
         hashcheck = True
 
     try:
-        step_bar = tqdm(total=16, desc=os.path.basename(filename), leave=False, unit="step")
+        step_bar = tqdm(total=15, desc=os.path.basename(filename), leave=False, unit="step")
 
         # Not all steps are required for every upload.
         # This is only an example of how to run DataBUS.
@@ -182,6 +182,21 @@ for filename in tqdm(filenames, desc="Files", unit="file"):
             logfile = logging_response(databus["chron_controls"], logfile)
         step_bar.update(1)
 
+        logfile.append("=== Samples ===")
+        result = nh.safe_step(
+            "samples",
+            lambda csv_file=csv_file, databus=databus: nv.valid_sample(
+                cur=cur, yml_dict=yml_dict, csv_file=csv_file, databus=databus
+            ),
+            logfile,
+            conn,
+        )
+        if result is not None:
+            databus["samples"] = result
+            logfile = logging_response(databus["samples"], logfile)
+        step_bar.update(1)
+
+
         logfile.append("=== Geochron ===")
         result = nh.safe_step(
             "geochron",
@@ -196,6 +211,17 @@ for filename in tqdm(filenames, desc="Files", unit="file"):
             logfile = logging_response(databus["geochron"], logfile)
         step_bar.update(1)
 
+        # logfile.append("=== Geochron Control ===")
+        # result = nh.safe_step(
+        #     "geochroncontrol",
+        #     lambda databus=databus: nv.valid_geochroncontrol2(cur=cur, databus=databus),
+        #     logfile,
+        #     conn,
+        # )
+        # if result is not None:
+        #     databus["geochroncontrol"] = result
+        # step_bar.update(1)
+        
         logfile.append("=== Geochron Control ===")
         result = nh.safe_step(
             "geochroncontrol",
@@ -203,10 +229,6 @@ for filename in tqdm(filenames, desc="Files", unit="file"):
             logfile,
             conn,
         )
-        if result is not None:
-            databus["geochroncontrol"] = result
-        step_bar.update(1)
-
         logfile.append("=== Contacts ===")
         result = nh.safe_step(
             "contacts",
@@ -235,19 +257,6 @@ for filename in tqdm(filenames, desc="Files", unit="file"):
             logfile = logging_response(databus["database"], logfile)
         step_bar.update(1)
 
-        logfile.append("=== Samples ===")
-        result = nh.safe_step(
-            "samples",
-            lambda csv_file=csv_file, databus=databus: nv.valid_sample(
-                cur=cur, yml_dict=yml_dict, csv_file=csv_file, databus=databus
-            ),
-            logfile,
-            conn,
-        )
-        if result is not None:
-            databus["samples"] = result
-            logfile = logging_response(databus["samples"], logfile)
-        step_bar.update(1)
 
         logfile.append("=== Sample Ages ===")
         result = nh.safe_step(
@@ -261,20 +270,6 @@ for filename in tqdm(filenames, desc="Files", unit="file"):
         if result is not None:
             databus["sample_age"] = result
             logfile = logging_response(databus["sample_age"], logfile)
-        step_bar.update(1)
-
-        logfile.append("=== Data ===")
-        result = nh.safe_step(
-            "data",
-            lambda csv_file=csv_file, databus=databus: nv.valid_data(
-                cur=cur, yml_dict=yml_dict, csv_file=csv_file, databus=databus
-            ),
-            logfile,
-            conn,
-        )
-        if result is not None:
-            databus["data"] = result
-            logfile = logging_response(databus["data"], logfile)
         step_bar.update(1)
 
         logfile.append("=== Publications ===")
@@ -291,14 +286,33 @@ for filename in tqdm(filenames, desc="Files", unit="file"):
             logfile = logging_response(databus["publications"], logfile)
         step_bar.update(1)
 
+        logfile.append("=== Data ===")
+        result = nh.safe_step(
+            "data",
+            lambda csv_file=csv_file, databus=databus: nv.valid_data(
+                cur=cur, yml_dict=yml_dict, csv_file=csv_file, databus=databus
+            ),
+            logfile,
+            conn,
+        )
+        if result is not None:
+            databus["data"] = result
+            logfile = logging_response(databus["data"], logfile)
+        step_bar.update(1)
+
+        
+
         step_bar.close()
 
         all_true = all(databus[key].validAll for key in databus)
         all_true = all_true and hashcheck
-        if args.upload:
+        print(args["upload"])
+        if args["upload"] == True:
             if all_true:
+                print("all true case 1")
                 # Special command for finalizing the upload and inserting into the datasetsubmissions table.
                 databus["finalize"] = nv.insert_final(cur, databus=databus)
+                print("can i get over here?")
                 conn.commit()
                 logfile.append("Data has been successfully uploaded to the database.")
             else:
@@ -322,3 +336,4 @@ for filename in tqdm(filenames, desc="Files", unit="file"):
         for i in logfile:
             writer.write(i)
             writer.write("\n")
+
